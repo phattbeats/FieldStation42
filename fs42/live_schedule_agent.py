@@ -1,6 +1,7 @@
 import multiprocessing
 import datetime
 import logging
+import threading
 
 
 def _worker_build_schedules(lock, stations_to_build, amount_to_add):
@@ -41,6 +42,12 @@ class LiveScheduleAgent:
         self._worker = None
         self._last_check = None
         self._check_interval = datetime.timedelta(hours=1)
+        # Serialises tick() across callers. The multiprocessing lock above
+        # only guards the build worker — it does NOT prevent two threads
+        # in this process from both deciding to spawn a worker at once,
+        # which is the failure mode when tick() is driven from a
+        # wall-clock thread (see PHA-2263).
+        self._tick_lock = threading.Lock()
         self._l.info(
             f"Live schedule agent initialized: "
             f"trigger_at={self._trigger_at}, amount_to_add={self._amount_to_add}"
@@ -100,6 +107,15 @@ class LiveScheduleAgent:
         return True
 
     def tick(self):
+        # Serialise tick() across callers so the wall-clock thread
+        # (PHA-2263) and any other potential caller cannot both decide to
+        # spawn a worker in the same instant. Without this lock, both
+        # callers see `_worker is None`, both spawn, and we get two
+        # background build processes racing for the same data.
+        with self._tick_lock:
+            return self._tick_unlocked()
+
+    def _tick_unlocked(self):
         # first, check if a previous worker finished
         if self._worker_finished():
             from fs42.liquid_manager import LiquidManager
