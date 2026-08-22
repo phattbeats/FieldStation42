@@ -1,4 +1,5 @@
 import multiprocessing
+import threading
 from queue import Empty
 import argparse
 import time
@@ -24,6 +25,7 @@ from fs42.reception import (
     none_change_effect,
 )
 from fs42.live_schedule_agent import LiveScheduleAgent
+from fs42.schedule_agent_ticker import schedule_agent_ticker, DEFAULT_TICK_SECONDS
 from fs42.command_executor import execute_command
 
 logging.basicConfig(
@@ -100,13 +102,69 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
 
     # set up the live schedule agent if configured
     schedule_agent = None
+    schedule_agent_stop = None
+    schedule_agent_thread = None
     agent_conf = manager.server_conf.get("schedule_agent")
     if agent_conf and schedule_lock:
         schedule_agent = LiveScheduleAgent(agent_conf, schedule_lock)
-        logger.info("Live schedule agent is active")
+        # Drive tick() from a wall-clock daemon thread. The main loop
+        # blocks inside show_guide()/play_slot() until a channel change,
+        # so without this an unattended box would get one tick at boot
+        # and never another (see PHA-2263). Implementation lives in
+        # fs42/schedule_agent_ticker.py so it is unit-testable in
+        # isolation from the FS42 dependency graph.
+        schedule_agent_stop = threading.Event()
+        schedule_agent_thread = threading.Thread(
+            target=schedule_agent_ticker,
+            args=(schedule_agent, schedule_agent_stop),
+            kwargs={"tick_seconds": DEFAULT_TICK_SECONDS},
+            name="schedule-agent-ticker",
+            daemon=True,
+        )
+        schedule_agent_thread.start()
+        logger.info("Live schedule agent is active (background ticker running)")
     else:
         logger.info("Live schedule agent is not configured")
 
+    def _stop_schedule_agent():
+        if schedule_agent_stop is not None:
+            schedule_agent_stop.set()
+        if schedule_agent_thread is not None:
+            # Daemon threads die on process exit; join briefly so we know
+            # the in-flight tick (if any) finished cleanly before we
+            # return / exit.
+            schedule_agent_thread.join(timeout=2)
+
+    try:
+        return _main_loop_body(
+            transition_fn=transition_fn,
+            manager=manager,
+            reception=reception,
+            logger=logger,
+            schedule_agent=schedule_agent,
+            schedule_agent_stop=schedule_agent_stop,
+            schedule_agent_thread=schedule_agent_thread,
+            shutdown_queue=shutdown_queue,
+            api_proc=api_proc,
+        )
+    finally:
+        _stop_schedule_agent()
+
+
+def _main_loop_body(
+    transition_fn,
+    manager,
+    reception,
+    logger,
+    schedule_agent,
+    schedule_agent_stop,
+    schedule_agent_thread,
+    shutdown_queue,
+    api_proc,
+):
+    """The original main-loop body. Split out so the schedule-agent
+    ticker thread is reliably stopped on every exit path
+    (normal return, exception, or SIGINT via the signal handler)."""
     channel_socket = StationManager().server_conf["channel_socket"]
 
     # go ahead and clear the channel socket (or create if it doesn't exist)
@@ -156,6 +214,12 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
 
     def signal_handler(sig, frame):
         logger.critical("Received sig-int signal, attempting to exit gracefully...")
+        # Stop the schedule-agent ticker first so it can't fire another
+        # tick while we're tearing the player down.
+        if schedule_agent_stop is not None:
+            schedule_agent_stop.set()
+        if schedule_agent_thread is not None:
+            schedule_agent_thread.join(timeout=2)
         player.shutdown()
 
         update_status_socket("stopped", "", -1)
@@ -178,8 +242,11 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
     stuck_timer = 0
 
     while True:
-        if schedule_agent:
-            schedule_agent.tick()
+        # NOTE: schedule_agent.tick() is driven from a background thread
+        # started above (fs42.schedule_agent_ticker). It must NOT be
+        # called here in the main loop — doing so would re-introduce the
+        # "tick only on channel change" bug (see PHA-2263) and also race
+        # against the thread's own tick.
 
         logger.info(f"Playing station: {channel_conf['network_name']}")
 
