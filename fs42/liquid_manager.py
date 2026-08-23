@@ -36,8 +36,8 @@ class LiquidManager(object):
     def __init__(self):
         self.__dict__ = self.__we_are_all_one
         if not self._initialized:
-            self._initialized = True
             self.reload_schedules()
+            self._initialized = True
 
     def reload_schedules(self):
         self.station_configs = StationManager().stations
