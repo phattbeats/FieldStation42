@@ -458,6 +458,31 @@ class SequenceIO:
                 for r in cursor.fetchall()
             ]
             
+    def get_parent_tag_for_active(
+        self,
+        station_name,
+        sequence_name,
+        active_tag_path
+    ):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT parent_tag
+                FROM sequence_group_state
+                WHERE station = ?
+                  AND sequence_name = ?
+                  AND active_tag_path = ?
+            """, (
+                station_name,
+                sequence_name,
+                active_tag_path
+            ))
+
+            row = cursor.fetchone()
+
+            return row[0] if row else None
+
     def get_child_sequences(
         self,
         station_name,

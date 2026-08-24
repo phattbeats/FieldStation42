@@ -60,20 +60,46 @@ class SequenceAPI:
             _l.error(f"Sequence {sequence_name} for {station_config['network_name']} not found.")
             return None
 
-        if not SequenceAPI._normalize_sequence_position(seq):
+        if not seq.episodes:
             _l.error(
                 f"Sequence {sequence_name}:{tag_path} "
                 f"contains no episodes"
             )
             return None
-            
+
+        # Check completion against the raw stored current_index BEFORE any
+        # clamping: _normalize_sequence_position resets current_index to 0
+        # once it reaches len(episodes), which is the same threshold as
+        # end_index for the (default) end_perc=1 case. Normalizing first
+        # would silently swallow the completion signal every time and the
+        # group-advance branch below would never run.
+        if not SequenceAPI._normalize_sequence_position(seq, clamp_at_end=False):
+            _l.error(
+                f"Sequence {sequence_name}:{tag_path} "
+                f"contains no episodes"
+            )
+            return None
+
         # Handle end of sequence - reset to 0 to loop back to beginning
         elif seq.current_index >= seq.end_index:
             _l.info(
                 f"Sequence completed: "
                 f"{sequence_name}:{seq.tag_path}"
             )
-            parent_tag = seq.tag_path.rsplit("/",1)[0]
+            # Resolve the group's true parent_tag from sequence_group_state rather
+            # than deriving it by stripping the last path segment: group tag_paths
+            # can themselves contain slashes (e.g. "midnight_run/Cowboy Bebop/Specials"),
+            # so a naive rsplit collapses onto the wrong (nested) parent and the
+            # group cursor gets stuck self-referencing instead of round-robining
+            # across all sibling groups.
+            parent_tag = sio.get_parent_tag_for_active(
+                station_config["network_name"],
+                sequence_name,
+                seq.tag_path
+            )
+
+            if not parent_tag:
+                parent_tag = seq.tag_path.rsplit("/",1)[0]
 
             children = sio.get_child_sequences(
                 station_config["network_name"],
@@ -508,7 +534,7 @@ class SequenceAPI:
         return active_child
         
     @staticmethod
-    def _normalize_sequence_position(seq):
+    def _normalize_sequence_position(seq, clamp_at_end=True):
 
         if not seq or not seq.episodes:
             return False
@@ -516,7 +542,7 @@ class SequenceAPI:
         if seq.current_index < -1:
             seq.current_index = -1
 
-        if seq.current_index >= len(seq.episodes):
+        if clamp_at_end and seq.current_index >= len(seq.episodes):
             seq.current_index = 0
 
         return True
