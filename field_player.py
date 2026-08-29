@@ -441,6 +441,12 @@ if __name__ == "__main__":
             trans_fn = none_change_effect
         # else keep short change as default
 
+    # Populate the schedule catalog in the parent before forking the API
+    # server process below, so the child inherits it via copy-on-write
+    # instead of independently reloading the full catalog a second time
+    # (~1.3GB duplicate load observed in PHA-2613).
+    LiquidManager()
+
     if not args.no_server:
         # Set up shutdown queue and start API server as a background process
         shutdown_queue = multiprocessing.Queue()
