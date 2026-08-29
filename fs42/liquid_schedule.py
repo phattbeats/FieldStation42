@@ -452,6 +452,8 @@ class LiquidSchedule:
             current_mark = next_mark
         self._l.info("Content and reel schedules are completed")
 
+        new_blocks = self._patch_gaps(new_blocks)
+
         # now, make plans for all the blocks and make list to update play counts
         self._l.info(f"Building plans for {len(new_blocks)} new schedule blocks")
         play_counts = []
@@ -480,6 +482,38 @@ class LiquidSchedule:
         self._l.info("Saving blocks to disk")
         LiquidAPI.add_blocks(self.conf, new_blocks)
         self._load_blocks()
+
+    def _patch_gaps(self, blocks):
+        # defensive structural check: no build path should ever leave a time
+        # window with zero rows (invisible dead air, not even an Offair block).
+        # Any gap found here is a real scheduling bug upstream (e.g. a
+        # marathon/sequence splice dropping a slot) - patch it with an
+        # explicit LiquidOffAirBlock so it's never silently missing from the
+        # DB and stays visible to dead-air metrics.
+        if not blocks:
+            return blocks
+        patched = [blocks[0]]
+        for block in blocks[1:]:
+            prev = patched[-1]
+            if block.start_time > prev.end_time:
+                gap_start = prev.end_time
+                gap_end = block.start_time
+                self._l.error(
+                    f"Schedule gap detected for {self.conf['network_name']}: "
+                    f"{gap_start} -> {gap_end} ({(gap_end - gap_start).total_seconds()}s). "
+                    "Patching with Offair filler."
+                )
+                candidate = self.catalog.get_offair()
+                if candidate is None and "off_air_autobump" in self.conf:
+                    candidate = AutoBumpAgent.fill_block(self.conf, gap_end - gap_start)
+                if candidate is not None:
+                    if candidate.tag == AutoBumpAgent.tag_str:
+                        filler = LiquidWebBlock(candidate, gap_start, gap_end, "Offair")
+                    else:
+                        filler = LiquidOffAirBlock(candidate, gap_start, gap_end, "Offair")
+                    patched.append(filler)
+            patched.append(block)
+        return patched
 
     def _increment(self, how_much):
         # add time to the existing schedule
