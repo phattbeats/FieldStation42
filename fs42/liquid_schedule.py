@@ -439,8 +439,16 @@ class LiquidSchedule:
                     sys.exit(-1)
 
                 # make it for one hour.
-                # TODO: handle when it starts at half hour - just go to next hour (not always one hour)
-                next_mark = (current_mark + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                # Offair blocks are always exactly 1 hour long. The
+                # previous code ran `.replace(minute=0, second=0, microsecond=0)`
+                # AFTER the `+1h`, which silently rewinds `current_mark` to the
+                # top of the *prior* hour for any non-:00 starting time — e.g.
+                # offair at 23:30 produced a 30-min block (23:30→00:00) and
+                # rewound `current_mark` to 00:00 of the next day, re-opening
+                # the hour-0 on-air window and producing same-batch double-booked
+                # overlaps on REALITY (PHA-2770, 3 instances of 1800s overlap).
+                # Offair now ends exactly 1 hour after it started.
+                next_mark = current_mark + datetime.timedelta(hours=1)
                 if candidate.tag == AutoBumpAgent.tag_str:
                     new_block = LiquidWebBlock(candidate, current_mark, next_mark, "Offair")
                 else:
