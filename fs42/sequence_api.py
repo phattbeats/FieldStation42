@@ -488,7 +488,8 @@ class SequenceAPI:
 
         active_children = set(
             sio.get_all_active_sequences(
-                station_config["network_name"]
+                station_config["network_name"],
+                sequence_name
             )
         )
 

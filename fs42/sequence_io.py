@@ -440,18 +440,30 @@ class SequenceIO:
             
     def get_all_active_sequences(
         self,
-        station_name
+        station_name,
+        sequence_name=None
     ):
         with self._get_connection() as connection:
             cursor = connection.cursor()
 
-            cursor.execute("""
-                SELECT active_tag_path
-                FROM sequence_group_state
-                WHERE station = ?
-            """, (
-                station_name,
-            ))
+            if sequence_name is not None:
+                cursor.execute("""
+                    SELECT active_tag_path
+                    FROM sequence_group_state
+                    WHERE station = ?
+                      AND sequence_name = ?
+                """, (
+                    station_name,
+                    sequence_name,
+                ))
+            else:
+                cursor.execute("""
+                    SELECT active_tag_path
+                    FROM sequence_group_state
+                    WHERE station = ?
+                """, (
+                    station_name,
+                ))
 
             return [
                 r[0]
