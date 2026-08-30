@@ -1,5 +1,10 @@
 import math
 import random
+import re
+
+
+def _natural_sort_key(fpath):
+    return [int(chunk) if chunk.isdigit() else chunk.lower() for chunk in re.split(r"(\d+)", fpath)]
 
 
 class SequenceEntry:
@@ -45,8 +50,9 @@ class NamedSequence:
             entry = SequenceEntry(file)
             self.episodes.append(entry)
 
-        # explicitely sort them by file path for alpha-numeric ordering:
-        self.episodes = sorted(self.episodes, key=lambda entry: entry.fpath)
+        # sort by natural (numeric-aware) order so e.g. "Episode 2" sorts before "Episode 10";
+        # a plain string sort put S01E10 before S01E2, scrambling on-air marathon order (PHA-2742)
+        self.episodes = sorted(self.episodes, key=lambda entry: _natural_sort_key(entry.fpath))
 
         self.end_index = math.floor(self.end_perc * (len(self.episodes)))
 
