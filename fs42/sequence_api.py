@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import re
-from fs42.timings import DAYS
+from fs42.timings import DAYS, MONTHS
 from fs42.sequence_io import SequenceIO
 from fs42.media_processor import MediaProcessor
 from fs42.sequence import NamedSequence, SequenceEntry
@@ -12,6 +12,30 @@ SEASON_RE = re.compile(
     r"^(season\s*\d+|s\d+)$",
     re.IGNORECASE
 )
+
+# dirs that are legitimate content (symlinks must keep resolving for legacy
+# schedule rows and holiday date-hint playback) but must never be scanned as
+# their own randomly-sequenced "show" alongside the real show they live under
+NON_SEQUENCE_DIR_NAMES = {"specials", "extras"}
+
+# mirrors RangeHint.pattern in fs42/schedule_hint.py ("December 1 - December 25")
+# duplicated here (rather than imported) to avoid pulling in station_manager
+DATE_RANGE_DIR_RE = re.compile(
+    f"^ *({'|'.join(MONTHS)}) *([0-3]?[0-9]) *-? *({'|'.join(MONTHS)}) *([0-3]?[0-9]) *$",
+    re.IGNORECASE,
+)
+
+
+def _is_non_sequence_dir(dir_name):
+    if dir_name.lower() in NON_SEQUENCE_DIR_NAMES:
+        return True
+    # single-month date-hint dir, e.g. "December" (mirrors MonthHint.test_pattern)
+    if dir_name in MONTHS:
+        return True
+    # date-range date-hint dir, e.g. "December 12 - December 25"
+    if DATE_RANGE_DIR_RE.match(dir_name):
+        return True
+    return False
 
 class SequenceAPI:
     @staticmethod
@@ -553,7 +577,15 @@ class SequenceAPI:
 
         for root, dirs, files in os.walk(base_dir, followlinks=True):
             # follow symlinks and skip dotfiles to stay in sync with _rfind_media
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            # also prune Specials/Extras/date-hint dirs (and everything nested
+            # under them, e.g. "Specials/Menu Art") so they aren't scanned as
+            # their own bogus mini-sequence separate from the real show -
+            # this only affects named_sequence population, the on-disk
+            # symlinks are never touched
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".") and not _is_non_sequence_dir(d)
+            ]
 
             has_media = any(
                 not f.startswith(".")
