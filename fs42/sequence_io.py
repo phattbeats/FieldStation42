@@ -2,7 +2,7 @@ import sqlite3
 from contextlib import contextmanager
 
 from fs42.station_manager import StationManager
-from fs42.sequence import NamedSequence
+from fs42.sequence import NamedSequence, sequence_sort_key
 
 
 class SequenceIO:
@@ -341,7 +341,10 @@ class SequenceIO:
                 return
 
             named_sequence_id = row[0]
-            sorted_files = sorted(str(f) for f in file_list)
+            # Use the same season/episode-aware sort key as NamedSequence.populate (PHA-2951)
+            # instead of a plain string sort, so re-scans don't scramble marathon order for
+            # shows whose files mix "SxxEyy" and "NNxNN" naming conventions.
+            sorted_files = sorted((str(f) for f in file_list), key=sequence_sort_key)
 
             import logging
             _l = logging.getLogger("SEQUENCE")

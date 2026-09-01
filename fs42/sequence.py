@@ -1,5 +1,57 @@
 import math
 import random
+import re
+
+
+def _natural_sort_key(fpath):
+    return [int(chunk) if chunk.isdigit() else chunk.lower() for chunk in re.split(r"(\d+)", fpath)]
+
+
+_SXXEYY_RE = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
+# Anchored to a filename-boundary context (surrounded by non-digit separators such as
+# " - " / " " / "_") so it doesn't false-positive-match a resolution string like "1920x1080".
+# Season capped at 1-50, episode at 1-999 to further guard against accidental matches.
+_NNXNN_RE = re.compile(r"(?:^|[\s\-_])(\d{1,2})x(\d{1,3})(?:[\s\-_.]|$)")
+
+
+def sequence_sort_key(fpath):
+    """
+    Sort key for named-sequence episode ordering.
+
+    Parses season/episode information out of common naming conventions so that
+    files are ordered by (season, episode) instead of raw lexical order:
+      - "Show - S03E09 - Title.mkv"
+      - "Show - 10x08 - Title.mkv"
+
+    Mixing both naming conventions for the same show (PHA-2951) previously
+    produced two separately natural-sorted blocks concatenated together,
+    because the plain natural sort diverges on the literal "s" vs digit
+    character right after the split point.
+
+    When neither pattern is found, falls back to the original numeric-aware
+    natural sort key (PHA-2742) so shows using plain sequential numbering
+    (e.g. "Episode 2", "Episode 10") with no season/episode info still sort
+    correctly and don't regress.
+
+    The two branches return differently-shaped tuples: (0, season, episode)
+    for parsed season/episode entries and (1,) + tuple(natural_key) for the
+    fallback. Because the first element (0 vs 1) always differs between the
+    two branches, Python's tuple comparison short-circuits on that element
+    before it would ever need to compare the heterogeneous tails against
+    each other, so entries of both shapes can be safely sorted together.
+    """
+    match = _SXXEYY_RE.search(fpath)
+    if match:
+        season, episode = int(match.group(1)), int(match.group(2))
+        return (0, season, episode)
+
+    match = _NNXNN_RE.search(fpath)
+    if match:
+        season, episode = int(match.group(1)), int(match.group(2))
+        if 1 <= season <= 50 and 1 <= episode <= 999:
+            return (0, season, episode)
+
+    return (1,) + tuple(_natural_sort_key(fpath))
 
 
 class SequenceEntry:
@@ -45,8 +97,11 @@ class NamedSequence:
             entry = SequenceEntry(file)
             self.episodes.append(entry)
 
-        # explicitely sort them by file path for alpha-numeric ordering:
-        self.episodes = sorted(self.episodes, key=lambda entry: entry.fpath)
+        # sort by season/episode when parseable (PHA-2951), falling back to natural
+        # (numeric-aware) order so e.g. "Episode 2" sorts before "Episode 10" (PHA-2742).
+        # A plain natural/string sort put "10x08"-named files before all "S03E09"-named
+        # files for the same show regardless of actual season/episode, scrambling order.
+        self.episodes = sorted(self.episodes, key=lambda entry: sequence_sort_key(entry.fpath))
 
         self.end_index = math.floor(self.end_perc * (len(self.episodes)))
 
