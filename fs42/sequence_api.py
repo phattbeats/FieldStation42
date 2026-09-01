@@ -371,7 +371,9 @@ class SequenceAPI:
                     child_tag
                 )
 
-                file_list = MediaProcessor._rfind_media(show_dir)
+                file_list = SequenceAPI._filter_unprobeable(
+                    MediaProcessor._rfind_media(show_dir)
+                )
 
                 if not file_list:
                     continue
@@ -452,7 +454,9 @@ class SequenceAPI:
 
             return
         else:
-            file_list = MediaProcessor._rfind_media(f"{station_config['content_dir']}/{real_tag}")
+            file_list = SequenceAPI._filter_unprobeable(
+                MediaProcessor._rfind_media(f"{station_config['content_dir']}/{real_tag}")
+            )
 
         if not existing:
             seq_start = 0
@@ -591,6 +595,34 @@ class SequenceAPI:
 
         return active_child
         
+    @staticmethod
+    def _filter_unprobeable(file_list):
+        """
+        PHA-2951: named-sequence membership is scanned straight off the
+        filesystem (_rfind_media), independently of catalog building, which
+        separately drops any file that fails duration probing (corrupt/
+        damaged encodes -- e.g. American Dad! S05E09/S05E12/S05E14/S07E06 on
+        [swim]/Prime Time 3 all fail ffprobe with "header damaged"/"Missing
+        VOL header" errors). Previously that mismatch let permanently
+        unplayable files sit in sequence_entries forever, each one forcing
+        a single-episode index skip in the schedule every time through the
+        rotation. Exclude them here instead, at the same point the catalog
+        would, so a corrupt file only ever costs one entry (compacted out
+        of the canonical order) rather than a recurring skipped turn.
+        """
+        _l = logging.getLogger("SEQUENCE")
+        playable = []
+        for fpath in file_list:
+            duration, error_hint = MediaProcessor._get_duration(str(fpath))
+            if duration and duration > 0.0:
+                playable.append(fpath)
+            else:
+                _l.warning(
+                    f"Excluding {fpath} from sequence: "
+                    f"{error_hint or 'could not get duration'}"
+                )
+        return playable
+
     @staticmethod
     def _normalize_sequence_position(seq, clamp_at_end=True):
 
