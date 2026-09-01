@@ -69,6 +69,20 @@ class SequenceAPI:
         return seq
 
     @staticmethod
+    def get_sequence_length(station_config, sequence_name, tag_path) -> int:
+        """
+        Number of episodes in the (currently active child of, if grouped)
+        sequence -- used by liquid_schedule to bound how many times it will
+        step forward looking for a catalog-resolvable episode before giving
+        up (PHA-2951), so a sequence made up entirely of orphaned/uncataloged
+        files can't spin forever.
+        """
+        seq = SequenceAPI.get_sequence(station_config, sequence_name, tag_path)
+        if not seq or not seq.episodes:
+            return 0
+        return len(seq.episodes)
+
+    @staticmethod
     def get_next_in_sequence(station_config, sequence_name, tag_path) -> SequenceEntry:
         _l = logging.getLogger("SEQUENCE")
         sio = SequenceIO()
@@ -504,6 +518,25 @@ class SequenceAPI:
                 continue
 
             available.append(child)
+
+        # PHA-2951: prefer children that have never had a turn yet (fresh
+        # rows just added to the group, e.g. a newly-cataloged show) over
+        # ones that have already been rotated through at least once.
+        # random.choice() alone is memoryless -- with N group members it's
+        # entirely possible (and was observed for American Dad!/sitcoms and
+        # Space Ghost Coast to Coast/adult_swim) for a member to go many
+        # rotations without being picked purely by chance, giving zero
+        # scheduled blocks for a long time even though nothing is broken.
+        # Weighting fresh members first still leaves the ordering among them
+        # random, but guarantees every child gets at least one turn before
+        # any child gets a second, closing that starvation window without
+        # making the rotation deterministic.
+        never_played = [
+            child for child in available
+            if sio.get_sequence(station_config["network_name"], sequence_name, child).current_index == 0
+        ]
+        if never_played:
+            available = never_played
 
         # If every child is already active somewhere, fall back to allowing active children.
         if not available:

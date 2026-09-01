@@ -97,9 +97,37 @@ class LiquidSchedule:
                         f"{seq_ids[tag_index]}"
                     )
 
+            # PHA-2951: a sequence's on-disk episode list (built by scanning
+            # the filesystem directly) can contain files that never made it
+            # into the catalog (e.g. ffprobe couldn't read a duration for
+            # them at catalog-build time -- see MediaProcessor.process_one).
+            # Those "orphaned" sequence entries resolve to candidate=None
+            # here. Previously that raised MatchingContentNotFound for the
+            # whole slot, which fell back to an unrelated show from
+            # fallback_tag while the sequence's current_index had already
+            # been advanced past the orphan -- permanently and silently
+            # skipping that one episode's turn every time through the loop,
+            # with no episode actually missing from the underlying
+            # sequence_entries table. Instead, keep advancing within the
+            # *same* sequence past orphaned entries so real episodes don't
+            # get skipped; only fall through to the non-sequence fallback
+            # once the whole sequence has been exhausted without finding a
+            # single catalog-resolvable episode (a genuine content shortage).
             next_seq = SequenceAPI.get_next_in_sequence(self.conf, seq_name, tag_str)
-            if next_seq:
+            attempts = 0
+            while next_seq and candidate is None:
                 candidate = self.catalog.entry_by_fpath(next_seq.fpath)
+                if candidate is None:
+                    attempts += 1
+                    self._l.warning(
+                        f"[{self.conf['network_name']}] Sequence {seq_name}:{tag_str} "
+                        f"episode {next_seq.fpath} has no catalog entry (likely failed "
+                        "probing at catalog-build time) -- skipping to next in sequence "
+                        "instead of losing this slot's turn"
+                    )
+                    if attempts >= SequenceAPI.get_sequence_length(self.conf, seq_name, tag_str):
+                        break
+                    next_seq = SequenceAPI.get_next_in_sequence(self.conf, seq_name, tag_str)
 
             seq_key = SequenceAPI.make_sequence_key(self.conf, seq_name, tag_str)
         else:
