@@ -12,6 +12,7 @@ from fs42.slot_reader import SlotReader
 from fs42 import timings
 from fs42.liquid_blocks import LiquidBlock, LiquidClipBlock, LiquidOffAirBlock, LiquidLoopBlock, LiquidWebBlock
 from fs42.sequence_api import SequenceAPI
+from fs42.sequence_io import SequenceIO
 from fs42.catalog_api import CatalogAPI
 from fs42.liquid_api import LiquidAPI
 from fs42.marathon_agent import MarathonAgent
@@ -396,6 +397,28 @@ class LiquidSchedule:
 
         forward_buffer = []
 
+        # PHA-2952: make this build atomic with respect to sequence pointer
+        # advances. get_next_in_sequence() commits current_index to the DB as
+        # each episode is picked (required so repeated picks of the same
+        # sequence within this loop see prior picks), but new_blocks is only
+        # persisted once, at the very end of this method. A killed/retried
+        # weekly-rebuild used to leave current_index advanced with no
+        # corresponding schedule ever committed, permanently scrambling
+        # playback order on the next run. Self-heal first: if a prior build
+        # for this station never reached commit_index_journal(), its pointers
+        # are stale relative to the schedule actually on disk -- roll them
+        # back to the pre-build baseline before this build's own snapshot.
+        sio = SequenceIO()
+        network_name = self.conf["network_name"]
+        if sio.has_pending_index_journal(network_name):
+            restored = sio.restore_from_index_journal(network_name)
+            self._l.warning(
+                f"Found an uncommitted sequence-index journal for {network_name} "
+                f"(a prior build was interrupted before its schedule was persisted) "
+                f"-- rolled back {restored} sequence pointer(s) to their pre-build values."
+            )
+        sio.snapshot_current_indexes(network_name)
+
         # build exclusion index from sibling channels that share the same content_dir
         exclusion_index = self._build_exclusion_index(start_time, end_target)
 
@@ -517,6 +540,10 @@ class LiquidSchedule:
         self._blocks = new_blocks
         self._l.info("Saving blocks to disk")
         LiquidAPI.add_blocks(self.conf, new_blocks)
+        # PHA-2952: schedule is durably persisted -- the current_index
+        # advances made while building it are now consistent with something
+        # actually committed, so drop the pre-build snapshot.
+        sio.commit_index_journal(network_name)
         self._load_blocks()
 
     def _patch_gaps(self, blocks):

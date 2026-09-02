@@ -90,7 +90,91 @@ class SequenceIO:
             CREATE INDEX IF NOT EXISTS idx_named_sequence_parent
             ON named_sequence(station, sequence_name, parent_tag)
             """)
+
+            # PHA-2952: pre-build snapshot of current_index, used to make a
+            # schedule build atomic with respect to sequence pointer advances.
+            # get_next_in_sequence() commits current_index per-call (needed so
+            # repeated picks of the same sequence within one build see prior
+            # picks), but the resulting liquid_blocks schedule is only written
+            # once, at the very end of _fluid(). A killed/retried weekly-rebuild
+            # could previously leave pointers advanced with no corresponding
+            # schedule ever committed, permanently scrambling playback order.
+            # snapshot_current_indexes() is called before a build starts;
+            # commit_index_journal() clears it once the schedule is durably
+            # persisted; if a build never reaches that point, the next build
+            # finds the leftover snapshot and restore_from_journal() rewinds
+            # current_index back to the pre-build values before proceeding.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sequence_index_journal (
+                    station TEXT NOT NULL,
+                    sequence_name TEXT NOT NULL,
+                    tag_path TEXT NOT NULL,
+                    pre_build_index INTEGER NOT NULL,
+                    PRIMARY KEY (station, sequence_name, tag_path)
+                )
+            """)
             cursor.close()
+            connection.commit()
+
+    def has_pending_index_journal(self, station_name: str) -> bool:
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT 1 FROM sequence_index_journal WHERE station = ? LIMIT 1",
+                (station_name,),
+            )
+            return cursor.fetchone() is not None
+
+    def restore_from_index_journal(self, station_name: str):
+        """Roll current_index back to the values recorded by the last
+        snapshot_current_indexes() call for this station, then clear the
+        journal. Used to self-heal a station left in an inconsistent state
+        by a build that was killed before commit_index_journal()."""
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT sequence_name, tag_path, pre_build_index FROM sequence_index_journal WHERE station = ?",
+                (station_name,),
+            )
+            rows = cursor.fetchall()
+            for sequence_name, tag_path, pre_build_index in rows:
+                cursor.execute(
+                    """UPDATE named_sequence
+                                  SET current_index = ?
+                                  WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
+                    (pre_build_index, station_name, sequence_name, tag_path),
+                )
+            cursor.execute("DELETE FROM sequence_index_journal WHERE station = ?", (station_name,))
+            connection.commit()
+            return len(rows)
+
+    def snapshot_current_indexes(self, station_name: str):
+        """Record current_index for every sequence on this station before a
+        schedule build starts. Overwrites any prior snapshot for the station
+        (a fresh build always defines the new pre-build baseline)."""
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("DELETE FROM sequence_index_journal WHERE station = ?", (station_name,))
+            cursor.execute(
+                "SELECT sequence_name, tag_path, current_index FROM named_sequence WHERE station = ?",
+                (station_name,),
+            )
+            rows = cursor.fetchall()
+            for sequence_name, tag_path, current_index in rows:
+                cursor.execute(
+                    """INSERT INTO sequence_index_journal
+                                  (station, sequence_name, tag_path, pre_build_index)
+                                  VALUES (?, ?, ?, ?)""",
+                    (station_name, sequence_name, tag_path, current_index),
+                )
+            connection.commit()
+
+    def commit_index_journal(self, station_name: str):
+        """Clear the pre-build snapshot once the schedule that depends on the
+        advanced current_index values has been durably persisted."""
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("DELETE FROM sequence_index_journal WHERE station = ?", (station_name,))
             connection.commit()
 
     def put_sequence(self, station_name: str, named_sequence):
@@ -279,8 +363,8 @@ class SequenceIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                """UPDATE named_sequence 
-                              SET current_index = ? 
+                """UPDATE named_sequence
+                              SET current_index = ?
                               WHERE station = ? AND sequence_name = ? AND tag_path = ?""",
                 (new_index, station_name, sequence_name, tag_path),
             )
