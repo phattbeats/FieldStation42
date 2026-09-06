@@ -144,41 +144,77 @@ class CatalogIO:
     def put_catalog_entries(self, station_name: str, catalog_entries: list[CatalogEntry]):
         with self._get_connection() as connection:
             cursor = connection.cursor()
-
-            for entry in catalog_entries:
-                if isinstance(entry, CatalogEntry):
-                    # Convert hints list to JSON string for storage
-                    hints = []
-                    for hint in entry.hints:
-                        hint_json = json.dumps(hint.toJSON()) if entry.hints else None
-                        hints.append(hint_json)
-                    hints_json = json.dumps(hints) if hints else None
-
-                    # Use INSERT OR REPLACE to overwrite existing entries
-
-                    cursor.execute(
-                        """INSERT OR REPLACE INTO catalog_entries
-                                    (station, path, realpath, title, duration, tag, count, hints, content_type, media_type, updated_at)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                        (
-                            station_name,
-                            entry.path,
-                            entry.realpath,
-                            entry.title,
-                            entry.duration,
-                            entry.tag,
-                            entry.count,
-                            hints_json,
-                            entry.content_type,
-                            entry.media_type,
-                        ),
-                    )
-
-                else:
-                    print(f"Warning: Entry {entry} is not a CatalogEntry instance. Skipping.")
-
+            self._insert_entries(cursor, station_name, catalog_entries)
             connection.commit()
             cursor.close()
+
+    def replace_catalog_entries(self, station_name: str, catalog_entries: list[CatalogEntry]):
+        """
+        Replace a station's catalog, keeping the row id of every entry that survives.
+
+        liquid_blocks.content_json stores catalog row ids, so a rebuild that reissues
+        ids silently orphans every already-scheduled block that points at the old id -
+        the block then resolves to content=None, which is unplayable and crashes
+        LiquidManager.reset_sequences. Matching on the (station, tag, path) unique key
+        keeps those references pointing at the same content across a rebuild.
+        """
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""SELECT id, tag, path FROM catalog_entries WHERE station = ?""", (station_name,))
+            known_ids = {(tag, path): row_id for (row_id, tag, path) in cursor.fetchall()}
+            cursor.execute("""DELETE FROM catalog_entries WHERE station = ?""", (station_name,))
+            kept = self._insert_entries(cursor, station_name, catalog_entries, known_ids)
+            connection.commit()
+            cursor.close()
+            self._l.info(
+                f"Wrote catalog for {station_name}: {kept} of {len(catalog_entries)} entries kept their id"
+            )
+
+    def _insert_entries(self, cursor, station_name: str, catalog_entries: list[CatalogEntry], known_ids: dict = None):
+        """Insert entries, reusing the prior row id when known_ids has one for (tag, path)."""
+        kept = 0
+        for entry in catalog_entries:
+            if isinstance(entry, CatalogEntry):
+                # Convert hints list to JSON string for storage
+                hints = []
+                for hint in entry.hints:
+                    hint_json = json.dumps(hint.toJSON()) if entry.hints else None
+                    hints.append(hint_json)
+                hints_json = json.dumps(hints) if hints else None
+
+                prior_id = known_ids.get((entry.tag, entry.path)) if known_ids else None
+                if prior_id is not None:
+                    kept += 1
+
+                # Use INSERT OR REPLACE to overwrite existing entries
+
+                cursor.execute(
+                    """INSERT OR REPLACE INTO catalog_entries
+                                (id, station, path, realpath, title, duration, tag, count, hints, content_type, media_type, updated_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                    (
+                        prior_id,
+                        station_name,
+                        entry.path,
+                        entry.realpath,
+                        entry.title,
+                        entry.duration,
+                        entry.tag,
+                        entry.count,
+                        hints_json,
+                        entry.content_type,
+                        entry.media_type,
+                    ),
+                )
+                # keep the in-memory entry pointing at its row - blocks written later in
+                # this process store entry.dbid, and a None dbid is an orphan by birth
+                entry.dbid = prior_id if prior_id is not None else cursor.lastrowid
+                entry.station = station_name
+
+            else:
+                print(f"Warning: Entry {entry} is not a CatalogEntry instance. Skipping.")
+
+        return kept
 
     def get_catalog_entries(self, station_name: str):
         with self._get_connection() as connection:

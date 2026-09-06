@@ -18,8 +18,9 @@ class CatalogAPI:
 
     @staticmethod
     def set_entries(station_config, entries: list[CatalogEntry]):
-        CatalogAPI.delete_catalog(station_config)
-        CatalogIO().put_catalog_entries(station_config["network_name"], entries)
+        # delete-then-insert in one transaction, preserving row ids that scheduled
+        # liquid_blocks already point at
+        CatalogIO().replace_catalog_entries(station_config["network_name"], entries)
 
     @staticmethod
     def search_entries(station_config, query: str):
