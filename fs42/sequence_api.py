@@ -37,6 +37,31 @@ def _is_non_sequence_dir(dir_name):
         return True
     return False
 
+
+def _exclude_non_sequence_paths(file_list, base_dir):
+    """PHA-2784 pruned Specials/Extras/date-hint dirs from _find_show_dirs's
+    walk, so random_show never scans one as its own bogus mini-sequence. That
+    walk only decides which directories COUNT as a show - it does not filter
+    the file list any show or plain per-tag sequence is actually populated
+    from, so a date-hint dir living inside (or as a sibling under) a real
+    show's own directory still got every file under it enumerated straight
+    into the flat, alphabetically-sorted sequence pool. Since sequence
+    entries sort alphabetically, a hint dir sorting before "Season 1" shifts
+    every real episode's index later and wraparound resumes mid-series
+    instead of at idx0, permanently skipping whatever falls before it
+    (PHA-3347).
+    """
+    base_dir = os.path.abspath(base_dir)
+    kept = []
+    for fpath in file_list:
+        rel = os.path.relpath(os.path.abspath(fpath), base_dir)
+        parts = rel.split(os.sep)[:-1]
+        if any(_is_non_sequence_dir(part) for part in parts):
+            continue
+        kept.append(fpath)
+    return kept
+
+
 class SequenceAPI:
     @staticmethod
     def make_sequence_key(station_config, sequence_name, tag_path) -> dict:
@@ -372,7 +397,10 @@ class SequenceAPI:
                 )
 
                 file_list = SequenceAPI._filter_unprobeable(
-                    MediaProcessor._rfind_media(show_dir)
+                    _exclude_non_sequence_paths(
+                        MediaProcessor._rfind_media(show_dir),
+                        show_dir,
+                    )
                 )
 
                 if not file_list:
@@ -454,8 +482,12 @@ class SequenceAPI:
 
             return
         else:
+            tag_dir = f"{station_config['content_dir']}/{real_tag}"
             file_list = SequenceAPI._filter_unprobeable(
-                MediaProcessor._rfind_media(f"{station_config['content_dir']}/{real_tag}")
+                _exclude_non_sequence_paths(
+                    MediaProcessor._rfind_media(tag_dir),
+                    tag_dir,
+                )
             )
 
         if not existing:
