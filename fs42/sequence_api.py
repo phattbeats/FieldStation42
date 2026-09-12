@@ -281,6 +281,59 @@ class SequenceAPI:
         for slot in SequenceAPI._sequence_slots(station_config):
             SequenceAPI._scan_sequence_slot(station_config, slot)
 
+        SequenceAPI._prune_orphaned_empty_sequences(station_config)
+
+    @staticmethod
+    def _prune_orphaned_empty_sequences(station_config):
+        """
+        PHA-3417: drop named_sequence rows that hold zero entries AND whose
+        tag_path has no directory on disk.
+
+        _build_sequence's stale-show cleanup only walks a parent still declared
+        with the random_show strategy. A per-slot grid declaration
+        (hierarchical "tags" plus a shared "sequence") never reaches it, so a
+        row left behind by a renamed or deleted show directory survives every
+        --scan_sequences / --rebuild_sequences pass. Those rows are not inert:
+        _choose_next_child_sequence used to be able to hand one back, which
+        ended the group hand-off empty for all of its siblings.
+
+        Both conditions are required. A row with entries is live content and is
+        never touched here; a row whose directory exists but is momentarily
+        empty (a bad transfer, an unmounted drive) is left alone so a transient
+        filesystem state can't delete a pool's cursor.
+        """
+        _l = logging.getLogger("SEQUENCE")
+        sio = SequenceIO()
+
+        content_dir = station_config.get("content_dir")
+
+        for seq in sio.get_all_sequences_for_station(
+            station_config["network_name"]
+        ):
+
+            if seq.episodes:
+                continue
+
+            if not content_dir:
+                continue
+
+            tag_dir = os.path.join(content_dir, seq.tag_path)
+
+            if os.path.isdir(tag_dir):
+                continue
+
+            _l.warning(
+                f"Removing orphaned empty sequence "
+                f"{seq.sequence_name}:{seq.tag_path} "
+                f"(no entries and no directory on disk)"
+            )
+
+            sio.delete_sequence(
+                station_config["network_name"],
+                seq.sequence_name,
+                seq.tag_path
+            )
+
     @staticmethod
     def _sequence_slots(station_config):
         # first, scan normal weekly schedule slots
@@ -547,6 +600,18 @@ class SequenceAPI:
 
         for child in children:
 
+            # PHA-3417: an empty child is not inert -- handing it back ends
+            # the group hand-off with "contains no episodes" and
+            # get_next_in_sequence returns nothing, which silently drops the
+            # slot for EVERY sibling in the group, not just this child. Pass
+            # over it so a stale/emptied pool can't poison its siblings.
+            if not SequenceAPI._sequence_has_episodes(
+                station_config,
+                sequence_name,
+                child
+            ):
+                continue
+
             if child == current_tag_path:
                 continue
 
@@ -587,8 +652,44 @@ class SequenceAPI:
         if not available:
             available = children
 
+        # PHA-3417: the two fallback branches above go back to the raw child
+        # list, which can put an empty child back in play. Keep the empty ones
+        # only if there is genuinely nothing else to hand back.
+        non_empty = [
+            c
+            for c in available
+            if SequenceAPI._sequence_has_episodes(
+                station_config,
+                sequence_name,
+                c
+            )
+        ]
+        if non_empty:
+            available = non_empty
+
         return random.choice(available)
-        
+
+    @staticmethod
+    def _sequence_has_episodes(station_config, sequence_name, tag_path):
+        """
+        PHA-3417: True when the named_sequence row for tag_path exists and
+        holds at least one sequence_entries row.
+
+        A zero-entry row is the failure mode this guards. Two shapes have
+        been seen in the field: a show directory renamed out from under a
+        grid slot, and a tag pointing at a directory that never existed on
+        disk. Both leave a row with no entries and no counterpart on disk,
+        and each one broke wraparound for every sibling under its parent
+        tag.
+        """
+        seq = SequenceIO().get_sequence(
+            station_config["network_name"],
+            sequence_name,
+            tag_path
+        )
+
+        return bool(seq and seq.episodes)
+
     @staticmethod
     def _get_active_child_sequence(
         station_config,
@@ -616,7 +717,20 @@ class SequenceAPI:
             not active_child
             or active_child not in children
         ):
-            active_child = random.choice(children)
+            # PHA-3417: prefer a child that actually has episodes. Picking an
+            # empty one here parks the group cursor on a row that can never
+            # hand back an entry.
+            candidates = [
+                c
+                for c in children
+                if SequenceAPI._sequence_has_episodes(
+                    station_config,
+                    sequence_name,
+                    c
+                )
+            ] or children
+
+            active_child = random.choice(candidates)
 
             sio.set_active_sequence(
                 station_config["network_name"],
