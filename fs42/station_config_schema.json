@@ -475,6 +475,13 @@
           "type": "string",
           "description": "Tag/folder to use when no content is found for scheduled slot. Useful for content that only plays when all other content is filtered out."
         },
+        "sequence_series_order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional run order for sequence tag folders that hold more than one series. Sequences order episodes by (series, season, episode) and the series component is the show title, which is alphabetical -- a folder holding Star Trek, The Next Generation and Deep Space Nine airs TOS, then Deep Space Nine, then The Next Generation. List the series titles here to declare the intended order instead. Titles are matched loosely: case, punctuation and a '(1999)' year suffix are ignored. Any series not listed runs after every listed one, in title order. Omit this key entirely to keep the default behaviour."
+        },
         "meta_hints": {
           "type": "array",
           "description": "Availability rules for tags, expressed in config rather than folder names. Each entry restricts when content under the given tag(s) is eligible for selection.",

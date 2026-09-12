@@ -2,7 +2,23 @@ import sqlite3
 from contextlib import contextmanager
 
 from fs42.station_manager import StationManager
-from fs42.sequence import NamedSequence, sequence_sort_key
+from fs42.sequence import NamedSequence, normalize_series_order, sequence_sort_key
+
+
+def _series_order_for(station_name):
+    """
+    The station conf's optional "sequence_series_order" (PHA-3414), or None.
+
+    Sequences rebuilt from the database carry no conf of their own, so the
+    declared run order has to be looked up by station name here -- the one place
+    the DB rows are turned back into NamedSequence objects. A station with no
+    conf loaded (or no declared order) yields None, which is the pre-3414
+    ordering.
+    """
+    station_conf = StationManager().station_by_name(station_name)
+    if not station_conf:
+        return None
+    return station_conf.get("sequence_series_order")
 
 
 class SequenceIO:
@@ -263,7 +279,7 @@ class SequenceIO:
             )
             file_paths = [row[0] for row in cursor.fetchall()]
 
-            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized))
+            ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), _series_order_for(station_name))
             
             if ns.initialized != bool(initialized):
                 self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
@@ -296,7 +312,7 @@ class SequenceIO:
                 )
                 file_paths = [entry_row[0] for entry_row in cursor.fetchall()]
 
-                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized))
+                ns = NamedSequence(station_name, sequence_name, tag_path, start_perc, end_perc, current_index, file_paths, bool(initialized), _series_order_for(station_name))
                 if ns.initialized != bool(initialized):
                     self.update_initialized(station_name, sequence_name, tag_path, ns.initialized)
                 sequences.append(ns)
@@ -428,7 +444,10 @@ class SequenceIO:
             # Use the same season/episode-aware sort key as NamedSequence.populate (PHA-2951)
             # instead of a plain string sort, so re-scans don't scramble marathon order for
             # shows whose files mix "SxxEyy" and "NNxNN" naming conventions.
-            sorted_files = sorted((str(f) for f in file_list), key=sequence_sort_key)
+            # PHA-3414: rank with the station's declared series order too, so the
+            # cursor remap below lands on the same episode the engine will play.
+            series_ranks = normalize_series_order(_series_order_for(station_name))
+            sorted_files = sorted((str(f) for f in file_list), key=lambda f: sequence_sort_key(f, series_ranks))
 
             import logging
             _l = logging.getLogger("SEQUENCE")

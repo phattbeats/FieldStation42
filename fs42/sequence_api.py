@@ -416,7 +416,8 @@ class SequenceAPI:
                         seq_end,
                         0,
                         file_list,
-                        False
+                        False,
+                        station_config.get("sequence_series_order"),
                     )
 
                     sio.put_sequence(
@@ -498,7 +499,17 @@ class SequenceAPI:
             if "sequence_end" in slot:
                 seq_end = slot["sequence_end"]
 
-            ns = NamedSequence(station_config["network_name"], seq_name, seq_tag, seq_start, seq_end, 0, file_list, False)
+            ns = NamedSequence(
+                station_config["network_name"],
+                seq_name,
+                seq_tag,
+                seq_start,
+                seq_end,
+                0,
+                file_list,
+                False,
+                station_config.get("sequence_series_order"),
+            )
             sio.put_sequence(station_config["network_name"], ns)
         else:
             disk_files = set(str(f) for f in file_list)
