@@ -161,8 +161,25 @@ class LiquidIO:
         """
         Store liquid blocks in the database.
         """
+        if not liquid_blocks:
+            return
+
         with self._get_connection() as connection:
             cursor = connection.cursor()
+
+            # Any pre-existing row for this station whose time range overlaps
+            # the batch being written is now stale (superseded by these
+            # blocks) - drop it first. Without this, a batch that doesn't
+            # start exactly at the prior schedule's end_time (e.g. a
+            # real-time "now" anchored patch, or a rebuild that races another
+            # writer) leaves the old row in place and produces a permanent
+            # double-booked overlap instead of replacing it. See PHA-2748.
+            range_start = min(block.start_time for block in liquid_blocks)
+            range_end = max(block.end_time for block in liquid_blocks)
+            cursor.execute(
+                "DELETE FROM liquid_blocks WHERE station = ? AND start_time < ? AND end_time > ?",
+                (station_name, range_end, range_start),
+            )
 
             for block in liquid_blocks:
 
