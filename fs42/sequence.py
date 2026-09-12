@@ -1,4 +1,5 @@
 import math
+import os
 import random
 import re
 
@@ -13,13 +14,37 @@ _SXXEYY_RE = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
 # Season capped at 1-50, episode at 1-999 to further guard against accidental matches.
 _NNXNN_RE = re.compile(r"(?:^|[\s\-_])(\d{1,2})x(\d{1,3})(?:[\s\-_.]|$)")
 
+# A "(1999)"-style year disambiguator is part of the release naming convention,
+# not part of the series identity: the same show can be filed as both
+# "Scrubs - S08E01 - ..." and "Scrubs (2001) - S08E01 - ...". Dropping it keeps
+# two rips of one series in a single progression instead of splitting them into
+# two back-to-back runs of the same show.
+_TITLE_YEAR_RE = re.compile(r"\((?:19|20)\d{2}\)")
+# Collapse every run of non-alphanumerics to one space so the separator style
+# ("Star Trek- The Next Generation" vs "Star.Trek.The.Next.Generation") does not
+# fracture one series into two.
+_TITLE_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _series_title(basename, match):
+    """
+    Normalized series identity: the filename text that precedes the
+    season/episode marker.
+
+    "Star Trek Deep Space Nine - 1x10 - Move Along Home.mkv" -> "star trek deep space nine"
+    "Star Trek- The Next Generation - S01E10 - Hide and Q.mp4" -> "star trek the next generation"
+    """
+    title = _TITLE_YEAR_RE.sub(" ", basename[: match.start()])
+    return _TITLE_SEPARATOR_RE.sub(" ", title.lower()).strip()
+
 
 def sequence_sort_key(fpath):
     """
     Sort key for named-sequence episode ordering.
 
-    Parses season/episode information out of common naming conventions so that
-    files are ordered by (season, episode) instead of raw lexical order:
+    Parses series/season/episode information out of common naming conventions
+    so that files are ordered by (series, season, episode) instead of raw
+    lexical order:
       - "Show - S03E09 - Title.mkv"
       - "Show - 10x08 - Title.mkv"
 
@@ -28,28 +53,44 @@ def sequence_sort_key(fpath):
     because the plain natural sort diverges on the literal "s" vs digit
     character right after the split point.
 
-    When neither pattern is found, falls back to the original numeric-aware
-    natural sort key (PHA-2742) so shows using plain sequential numbering
-    (e.g. "Episode 2", "Episode 10") with no season/episode info still sort
-    correctly and don't regress.
+    The series component (PHA-3413) exists because one tag folder can hold more
+    than one series -- "star_trek" holds TOS, TNG and DS9 side by side. With a
+    (season, episode) key alone, all three series' S01E11 collide on one key and
+    the pool interleaves TOS -> TNG -> DS9 -> TOS every single episode instead
+    of playing one series through. The docs describe stock ordering as "all
+    videos are collected recursively and sorted by full path", which keeps a
+    multi-series folder grouped; this key is a deviation from that (it has to
+    be, for PHA-2951/PHA-2742), so it has to carry the grouping itself.
 
-    The two branches return differently-shaped tuples: (0, season, episode)
-    for parsed season/episode entries and (1,) + tuple(natural_key) for the
-    fallback. Because the first element (0 vs 1) always differs between the
-    two branches, Python's tuple comparison short-circuits on that element
-    before it would ever need to compare the heterogeneous tails against
-    each other, so entries of both shapes can be safely sorted together.
+    The series identity is taken from the BASENAME, not the directory: the
+    directory is unreliable here because seasonal hint folders ("December/",
+    "October 27 - October 31/") sit alongside "Season 1/" under the same show
+    and a path-ordered key would air the Christmas episodes first.
+
+    When neither pattern is found, falls back to the original numeric-aware
+    natural sort key over the full path (PHA-2742) so shows using plain
+    sequential numbering (e.g. "Episode 2", "Episode 10") with no
+    season/episode info still sort correctly and don't regress.
+
+    The two branches return differently-shaped tuples: (0, series, season,
+    episode) for parsed season/episode entries and (1,) + tuple(natural_key)
+    for the fallback. Because the first element (0 vs 1) always differs between
+    the two branches, Python's tuple comparison short-circuits on that element
+    before it would ever need to compare the heterogeneous tails against each
+    other, so entries of both shapes can be safely sorted together.
     """
-    match = _SXXEYY_RE.search(fpath)
+    basename = os.path.basename(fpath)
+
+    match = _SXXEYY_RE.search(basename)
     if match:
         season, episode = int(match.group(1)), int(match.group(2))
-        return (0, season, episode)
+        return (0, _series_title(basename, match), season, episode)
 
-    match = _NNXNN_RE.search(fpath)
+    match = _NNXNN_RE.search(basename)
     if match:
         season, episode = int(match.group(1)), int(match.group(2))
         if 1 <= season <= 50 and 1 <= episode <= 999:
-            return (0, season, episode)
+            return (0, _series_title(basename, match), season, episode)
 
     return (1,) + tuple(_natural_sort_key(fpath))
 
