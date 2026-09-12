@@ -95,8 +95,9 @@ class TestNaturalSortKeyHandlesMixedSxxeyyAndNnxnnNaming(unittest.TestCase):
         A "1920x1080" resolution token in a filename must not be mistaken
         for a season/episode NNxNN marker.
         """
+        # (0, series, season, episode) since PHA-3413 added the series component
         key = sequence_sort_key("Some Show - S02E05 - 1920x1080 - Title.mkv")
-        self.assertEqual(key, (0, 2, 5))
+        self.assertEqual(key, (0, "some show", 2, 5))
 
 
 if __name__ == "__main__":
