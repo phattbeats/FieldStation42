@@ -441,6 +441,20 @@ if __name__ == "__main__":
             trans_fn = none_change_effect
         # else keep short change as default
 
+    # Populate the schedule catalog in the parent before forking the API
+    # server process below, so the child inherits it via copy-on-write
+    # instead of independently reloading the full catalog a second time
+    # (~1.3GB duplicate load observed in PHA-2613).
+    # This is the same first-touch path main_loop() would hit anyway, so
+    # it needs the same StationConfigError handling as the try/except
+    # below - otherwise a bad channel config raises here uncaught instead
+    # of exiting cleanly.
+    try:
+        LiquidManager()
+    except StationConfigError as e:
+        logging.getLogger("FieldPlayer").error(str(e))
+        raise SystemExit(-1)
+
     if not args.no_server:
         # Set up shutdown queue and start API server as a background process
         shutdown_queue = multiprocessing.Queue()
