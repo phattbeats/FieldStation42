@@ -196,9 +196,22 @@ class SequenceAPI:
                     sequence_name,
                     next_child
                 )
-                
-                next_seq.current_index = 0
-                if next_seq.start_index > 0:
+
+                # PHA-3588: only snap to the window start when the persisted
+                # current_index is actually invalid for this pool (never
+                # played, already finished a prior cycle, or out of range
+                # after the pool shrank). A child can lose active status
+                # before finishing its own cycle -- _get_active_child_sequence
+                # falls back to a fresh active pick, without touching
+                # current_index, whenever the DB's active-sequence pointer is
+                # missing or stale -- so a persisted mid-window index here can
+                # be genuine, resumable progress. Unconditionally zeroing it
+                # threw that progress away every time the group rotated back
+                # to this child, which is Finding 2 of PHA-3510.
+                if (
+                    next_seq.current_index < next_seq.start_index
+                    or next_seq.current_index >= next_seq.end_index
+                ):
                     next_seq.current_index = next_seq.start_index
 
                 if not SequenceAPI._normalize_sequence_position(next_seq):
