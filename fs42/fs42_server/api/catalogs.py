@@ -37,6 +37,18 @@ async def get_catalog(network_name: str):
     catalog_entries = CatalogAPI.get_entries(conf)
     return {"network_name": network_name, "catalog_entries": catalog_entries}
 
+@router.get("/skipped/{network_name}")
+async def get_skipped_files(network_name: str):
+    """Files the last catalog build could not probe, with the reason each was dropped.
+
+    PHA-2197: the scan used to drop these files without a word. This endpoint
+    makes the drop list visible so the operator can act on it.
+    """
+    conf = StationManager().station_by_name(network_name)
+    skipped = CatalogAPI.get_skipped_files(conf)
+    return {"network_name": network_name, "skipped_count": len(skipped), "skipped_files": skipped}
+
+
 @router.get("/search/{network_name}")
 async def search_catalog(network_name: str, query: str = None):
     conf = StationManager().station_by_name(network_name)

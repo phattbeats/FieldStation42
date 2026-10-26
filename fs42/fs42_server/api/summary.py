@@ -64,6 +64,12 @@ async def get_catalog_summary():
     summaries = []
     for station in StationManager().stations:
         catalog_entries = CatalogAPI.get_entries(station)
-        summary = {"network_name": station["network_name"], "entry_count": len(catalog_entries)}
+        summary = {
+            "network_name": station["network_name"],
+            "entry_count": len(catalog_entries),
+            # PHA-2197: files the scan could not probe are reported, not
+            # silently dropped. Zero here means the last build dropped nothing.
+            "skipped_count": CatalogAPI.count_skipped_files(station),
+        }
         summaries.append(summary)
     return {"catalog_summaries": summaries}

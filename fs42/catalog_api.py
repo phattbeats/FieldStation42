@@ -15,6 +15,21 @@ class CatalogAPI:
     @staticmethod
     def delete_catalog(station_config):
         CatalogIO().delete_all_entries_for_station(station_config["network_name"])
+        # PHA-2197: the skip report belongs to the catalog it describes, so it
+        # is cleared with it rather than left describing a stale build.
+        CatalogIO().delete_skipped_files(station_config["network_name"])
+
+    @staticmethod
+    def set_skipped_files(station_config, skipped_files: list[dict]):
+        CatalogIO().replace_skipped_files(station_config["network_name"], skipped_files)
+
+    @staticmethod
+    def get_skipped_files(station_config):
+        return CatalogIO().get_skipped_files(station_config["network_name"])
+
+    @staticmethod
+    def count_skipped_files(station_config):
+        return CatalogIO().count_skipped_files(station_config["network_name"])
 
     @staticmethod
     def set_entries(station_config, entries: list[CatalogEntry]):

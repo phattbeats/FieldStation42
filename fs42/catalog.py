@@ -70,6 +70,11 @@ class ShowCatalog:
         # the tag/duration cache index
         self.tag_dur_cache = {}
 
+        # Files the scan could not probe, with the reason each one was dropped
+        # (PHA-2197). Persisted with the catalog so a skipped file is visible
+        # instead of vanishing from the scan without explanation.
+        self.skipped_files = []
+
         # basically, a flattened list of clip_index keys
         self.tags = []
 
@@ -100,6 +105,10 @@ class ShowCatalog:
                 print(f"Error processing tag '{tag}': {e}")
 
         CatalogAPI.set_entries(self.config, flat_list)
+
+        # PHA-2197: persist the skip report next to the catalog so the API can
+        # show exactly which files the scan dropped and why.
+        CatalogAPI.set_skipped_files(self.config, self.skipped_files)
 
     def load_catalog(self):
         if self.config["network_type"] == "streaming":
@@ -150,7 +159,7 @@ class ShowCatalog:
         media_filter = self.config.get("media_filter", "video")
         self._l.info(f"Checking for media in {self.config['content_dir']} for single directory with filter={media_filter}")
         file_list = MediaProcessor._find_media(self.config["content_dir"], media_filter)
-        self.clip_index[tag] = MediaProcessor._process_media(file_list, tag, content_type="feature")
+        self.clip_index[tag] = MediaProcessor._process_media(file_list, tag, content_type="feature", skipped=self.skipped_files)
         self._l.info(f"Building complete - processed {len(file_list)} files")
         self._write_catalog()
 
@@ -303,11 +312,11 @@ class ShowCatalog:
                     if tag_key not in self.clip_index:
                         self.clip_index[tag_key] = []
                     file_list = MediaProcessor._find_media(subfolder_path, media_filter)
-                    clips = MediaProcessor._process_media(file_list, tag_key, content_type="bump")
+                    clips = MediaProcessor._process_media(file_list, tag_key, content_type="bump", skipped=self.skipped_files)
                     subdir_clips = MediaProcessor._process_subs(
                         subfolder_path, tag_key, bumpdir=True,
                         fluid=self.__fluid_builder, content_type="bump",
-                        media_filter=media_filter
+                        media_filter=media_filter, skipped=self.skipped_files
                     )
                     self.clip_index[tag_key] = clips + subdir_clips
                     total_count += len(self.clip_index[tag_key])
@@ -359,7 +368,7 @@ class ShowCatalog:
 
             file_list = MediaProcessor._find_media(tag_dir, media_filter)
 
-            self.clip_index[tag] = MediaProcessor._process_media(file_list, tag, fluid=self.__fluid_builder, content_type=content_type)
+            self.clip_index[tag] = MediaProcessor._process_media(file_list, tag, fluid=self.__fluid_builder, content_type=content_type, skipped=self.skipped_files)
             self._l.info(f"--Found {len(self.clip_index[tag])} videos in {tag} folder")
             self._l.debug(f"---- {tag} media listing: {self.clip_index[tag]}")
 
@@ -367,7 +376,7 @@ class ShowCatalog:
             if self.__fluid_builder and not self.skip_chapter_scan:
                 self.__fluid_builder.scan_chapters_for_entries(self.clip_index[tag])
 
-            subdir_clips = MediaProcessor._process_subs(tag_dir, tag, bumpdir=is_bumps, fluid=self.__fluid_builder, content_type=content_type, media_filter=media_filter)
+            subdir_clips = MediaProcessor._process_subs(tag_dir, tag, bumpdir=is_bumps, fluid=self.__fluid_builder, content_type=content_type, media_filter=media_filter, skipped=self.skipped_files)
 
             self._l.info(f"--Found {len(subdir_clips)} videos in {tag} subfolders")
             self._l.debug(f"---- {tag} sub folder media listing: {subdir_clips}")
@@ -444,7 +453,7 @@ class ShowCatalog:
         if os.path.isdir(bump_path):
             to_process = MediaProcessor._find_media(bump_path)
 
-        bumps = MediaProcessor._process_media(to_process, tag, fluid=self.__fluid_builder, content_type="bump")
+        bumps = MediaProcessor._process_media(to_process, tag, fluid=self.__fluid_builder, content_type="bump", skipped=self.skipped_files)
 
         if len(bumps):
             for fp in bumps:
