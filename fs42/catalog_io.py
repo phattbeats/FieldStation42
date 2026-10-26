@@ -95,6 +95,20 @@ class CatalogIO:
             cursor.execute("""CREATE INDEX IF NOT EXISTS idx_catalog_tag_duration_count
                     ON catalog_entries(station, tag, duration, count)""")
 
+            # PHA-2197: files the catalog scan could not probe are recorded
+            # instead of vanishing from the scan without explanation.
+            cursor.execute("""CREATE TABLE IF NOT EXISTS catalog_skipped_files (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                station TEXT NOT NULL,
+                                path TEXT NOT NULL,
+                                reason TEXT,
+                                skipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                UNIQUE(station, path)
+                                )""")
+
+            cursor.execute("""CREATE INDEX IF NOT EXISTS idx_catalog_skipped_station
+                            ON catalog_skipped_files(station)""")
+
             cursor.close()
 
     def entry_by_id(self, entry_id: int):
@@ -261,6 +275,61 @@ class CatalogIO:
         with self._get_connection() as connection:
             cursor = connection.cursor()
             cursor.execute("""DELETE FROM catalog_entries WHERE station = ?""", (station_name,))
+            connection.commit()
+            cursor.close()
+
+    def replace_skipped_files(self, station_name: str, skipped_files: list[dict]):
+        """Replace the skip report for a station.
+
+        PHA-2197. Each record is {"path": ..., "reason": ...}. The report is
+        rewritten wholesale on every catalog build so it always describes the
+        current state of the content directory.
+        """
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""DELETE FROM catalog_skipped_files WHERE station = ?""", (station_name,))
+            for record in skipped_files:
+                cursor.execute(
+                    """INSERT OR REPLACE INTO catalog_skipped_files
+                                (station, path, reason, skipped_at)
+                                VALUES (?, ?, ?, CURRENT_TIMESTAMP)""",
+                    (station_name, record.get("path", ""), record.get("reason")),
+                )
+            connection.commit()
+            cursor.close()
+
+    def get_skipped_files(self, station_name: str) -> list[dict]:
+        """Return the skip report for a station as a list of dicts."""
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """SELECT path, reason, skipped_at FROM catalog_skipped_files
+                              WHERE station = ? ORDER BY path""",
+                (station_name,),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+
+        return [
+            {"path": row[0], "reason": row[1], "skipped_at": row[2]}
+            for row in rows
+        ]
+
+    def count_skipped_files(self, station_name: str) -> int:
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """SELECT COUNT(*) FROM catalog_skipped_files WHERE station = ?""",
+                (station_name,),
+            )
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+
+    def delete_skipped_files(self, station_name: str):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute("""DELETE FROM catalog_skipped_files WHERE station = ?""", (station_name,))
             connection.commit()
             cursor.close()
 

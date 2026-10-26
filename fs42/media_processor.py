@@ -2,6 +2,7 @@ import logging
 import os
 import glob
 import json
+import subprocess
 import sys
 
 # Validate ffmpeg-python package
@@ -50,6 +51,21 @@ except ImportError:
 
 from fs42.schedule_hint import MonthHint, QuarterHint, RangeHint, BumpHint, DayPartHint, DayofWeekHint
 from fs42.catalog_entry import CatalogEntry
+
+
+# Bound on the per-file duration probe (PHA-2197).
+#
+# ffmpeg-python's probe() shells out with Popen.communicate() and no timeout,
+# so a wedged ffprobe - dead mount, unplugged drive, a file that never
+# finishes demuxing - stalls the whole catalog build with no way out. Calling
+# ffprobe directly lets us bound the wait and still capture stderr for the
+# error hint.
+#
+# The default is generous on purpose: this timeout is a backstop against a
+# HANG, not a speed knob. The probe only has to read the container header,
+# but media on slow storage can legitimately take a few seconds to spin up.
+# Override with FS42_FFPROBE_TIMEOUT_SECONDS if your storage needs longer.
+DEFAULT_FFPROBE_TIMEOUT_SECONDS = 10.0
 
 
 class MediaProcessor:
@@ -136,7 +152,7 @@ class MediaProcessor:
                 'title': os.path.splitext(os.path.basename(file_path))[0]
             }
 
-    def process_one(fname, tag, hints, fluid=None, content_type="feature") -> CatalogEntry:
+    def process_one(fname, tag, hints, fluid=None, content_type="feature", skipped=None) -> CatalogEntry:
         _l = logging.getLogger("MEDIA")
         _l.debug(f"--process_one is working on {fname}")
         # get video file length in seconds
@@ -157,19 +173,23 @@ class MediaProcessor:
 
             # it might not support streams, so check with moviepy
             if duration <= 0.0:
-                try:
-                    video_clip = VideoFileClip(fname)
-                    duration = video_clip.duration
-                    video_clip.close()
-                except Exception:
-                    pass
+                moviepy_duration, moviepy_hint = MediaProcessor._moviepy_duration(fname)
+                if moviepy_duration > 0.0:
+                    duration = moviepy_duration
+                    error_hint = None
+                else:
+                    # PHA-2197: keep BOTH reasons. The MoviePy exception used to
+                    # be thrown away by a bare "except Exception: pass", so the
+                    # only clue an operator got was "Could not get duration" -
+                    # with no way to tell a bad file from a missing codec.
+                    error_hint = MediaProcessor._combine_hints(error_hint, moviepy_hint)
+
             # see if both returned 0
             if duration <= 0.0:
-                if error_hint:
-                    _l.warning(f"Skipping {fname}: {error_hint}")
-                else:
-                    _l.warning(f"Could not get duration for {fname}")
-                _l.warning("Files with 0 length can't be added to the catalog.")
+                reason = error_hint or "duration could not be determined"
+                _l.warning(f"Skipping {fname}: {reason}")
+                if skipped is not None:
+                    skipped.append({"path": fname, "reason": reason})
             else:
                 # Detect media type from file extension
                 media_type = MediaProcessor.get_media_type(fname)
@@ -185,7 +205,7 @@ class MediaProcessor:
         return result
 
     @staticmethod
-    def _process_media(file_list, tag, hints=[], fluid=None, content_type="feature") -> list[CatalogEntry]:
+    def _process_media(file_list, tag, hints=[], fluid=None, content_type="feature", skipped=None) -> list[CatalogEntry]:
         _l = logging.getLogger("MEDIA")
         _l.debug(f"_process_media starting processing for tag={tag} on {len(file_list)} files")
         show_clip_list = []
@@ -197,7 +217,7 @@ class MediaProcessor:
         for fname in file_list:
             _l.debug(f"--_process_media is working on {fname}")
             # get video file length in seconds
-            results = MediaProcessor.process_one(fname, tag, hints, fluid, content_type)
+            results = MediaProcessor.process_one(fname, tag, hints, fluid, content_type, skipped)
             if results:
                 show_clip_list.append(results)
             else:
@@ -213,40 +233,132 @@ class MediaProcessor:
                 count_printed += 1
                 if count_printed >= 10:
                     _l.warning(f"and {len(failed) - count_printed} more...")
+                    break
 
         return show_clip_list
 
     @staticmethod
-    def _get_duration(file_name) -> tuple:
-        """Returns (duration, error_hint). duration is -1 on failure; error_hint is a human-readable cause or None."""
-        _l = logging.getLogger("MEDIA")
-        try:
-            probed = ffmpeg.probe(file_name)
+    def _combine_hints(primary, secondary):
+        """Join two probe failure reasons without losing either one."""
+        if primary and secondary:
+            return f"{primary} | MoviePy fallback: {secondary}"
+        return primary or secondary
 
-            if "streams" in probed and len(probed["streams"]) and "duration" in probed["streams"][0]:
-                return float(probed["streams"][0]["duration"]), None
-            elif "format" in probed and "duration" in probed["format"]:
-                return float(probed['format']['duration']), None
-            else:
-                return -1, None
-        except AttributeError as e:
-            # This should never happen now due to startup check, but just in case
-            _l.error(f"ffmpeg module error - you may have the wrong package installed: {e}")
-            _l.error("Please ensure you have activated the virtual environment and have ffmpeg-python installed")
-            return -1, None
-        except ffmpeg.Error as e:
-            stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
-            if 'score of 1' in stderr or 'misdetection possible' in stderr:
-                hint = "file does not appear to be a valid video — may be a corrupt or failed download"
-            elif 'moov atom not found' in stderr:
-                hint = "file is an incomplete MP4 — moov atom missing, likely an interrupted download or encode"
-            else:
-                hint = None
-            _l.debug(f"FFmpeg error probing {file_name}: {e}")
+    @staticmethod
+    def _moviepy_duration(fname) -> tuple:
+        """Second-chance duration probe via MoviePy.
+
+        Returns (duration, error_hint). duration is -1 on failure and the hint
+        carries the actual exception, so a file that gets skipped is never
+        skipped silently (PHA-2197).
+        """
+        _l = logging.getLogger("MEDIA")
+        video_clip = None
+        try:
+            video_clip = VideoFileClip(fname)
+            return float(video_clip.duration), None
+        except Exception as e:
+            return -1.0, f"{type(e).__name__}: {e}"
+        finally:
+            # Always release the clip. If VideoFileClip() succeeded but reading
+            # .duration raised, the old code never closed it and leaked the
+            # underlying ffmpeg process for every skipped file.
+            if video_clip is not None:
+                try:
+                    video_clip.close()
+                except Exception as close_error:
+                    _l.debug(f"Could not close MoviePy clip for {fname}: {close_error}")
+
+    @staticmethod
+    def _ffprobe_timeout() -> float:
+        """Timeout in seconds for the duration probe."""
+        raw = os.environ.get("FS42_FFPROBE_TIMEOUT_SECONDS")
+        if not raw:
+            return DEFAULT_FFPROBE_TIMEOUT_SECONDS
+        try:
+            timeout = float(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_FFPROBE_TIMEOUT_SECONDS
+        if timeout <= 0:
+            return DEFAULT_FFPROBE_TIMEOUT_SECONDS
+        return timeout
+
+    @staticmethod
+    def _duration_error_hint(stderr: str):
+        """Translate ffprobe stderr into a short, operator-readable cause.
+
+        PHA-2197: a skipped file with no stated reason is indistinguishable
+        from a skipped file the operator cannot act on. The last stderr line is
+        used as a fallback so there is always something concrete to work from.
+        """
+        if not stderr:
+            return None
+        if "score of 1" in stderr or "misdetection possible" in stderr:
+            return "file does not appear to be a valid video - may be a corrupt or failed download"
+        if "moov atom not found" in stderr:
+            return "file is an incomplete MP4 - moov atom missing, likely an interrupted download or encode"
+        if "Invalid data found when processing input" in stderr:
+            return "file header is damaged or the container is not media - re-encode required"
+        lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+        if lines:
+            return f"ffprobe: {lines[-1]}"
+        return None
+
+    @staticmethod
+    def _get_duration(file_name) -> tuple:
+        """Returns (duration, error_hint). duration is -1 on failure; error_hint is a human-readable cause or None.
+
+        PHA-2197: ffprobe is invoked directly instead of through ffmpeg-python so
+        the probe can be bounded by a timeout. ffmpeg-python's probe() calls
+        Popen.communicate() with no timeout, so one wedged ffprobe used to hang
+        the entire catalog build with no log line and no way out.
+        """
+        _l = logging.getLogger("MEDIA")
+        timeout = MediaProcessor._ffprobe_timeout()
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-show_format", "-show_streams", "-of", "json", file_name],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            hint = f"ffprobe timed out after {timeout:g}s"
+            _l.debug(f"FFprobe timed out on {file_name} after {timeout}s")
             return -1, hint
+        except FileNotFoundError:
+            _l.error("ffprobe was not found on PATH - duration probing is unavailable")
+            return -1, "ffprobe is not installed on this system"
         except Exception as e:
             _l.debug(f"Unexpected error probing {file_name}: {e}")
             return -1, None
+
+        if result.returncode != 0:
+            hint = MediaProcessor._duration_error_hint(result.stderr or "")
+            _l.debug(f"FFmpeg error probing {file_name}: {result.stderr}")
+            return -1, hint
+
+        try:
+            probed = json.loads(result.stdout)
+        except (TypeError, ValueError) as e:
+            _l.debug(f"Could not parse ffprobe output for {file_name}: {e}")
+            return -1, "ffprobe output could not be parsed"
+
+        # A stream duration of "N/A" is common in raw and some MKV streams. Fall
+        # through to the container duration instead of dropping the file -
+        # PHA-2197: the old code raised on float("N/A") and fell straight
+        # through to "skip this file", losing perfectly playable media.
+        if "streams" in probed and len(probed["streams"]) and "duration" in probed["streams"][0]:
+            try:
+                return float(probed["streams"][0]["duration"]), None
+            except (TypeError, ValueError):
+                pass
+        if "format" in probed and "duration" in probed["format"]:
+            try:
+                return float(probed["format"]["duration"]), None
+            except (TypeError, ValueError):
+                pass
+        return -1, None
 
     @staticmethod
     def _find_media(path, media_filter="video") -> list[str]:
@@ -345,7 +457,7 @@ class MediaProcessor:
         return hints
 
     @staticmethod
-    def _process_subs(dir_path, tag, bumpdir=False, fluid=None, content_type="feature", media_filter="video"):
+    def _process_subs(dir_path, tag, bumpdir=False, fluid=None, content_type="feature", media_filter="video", skipped=None):
         """Process all subdirectories recursively, collecting hints from all levels"""
         from collections import defaultdict
 
@@ -376,7 +488,7 @@ class MediaProcessor:
                     hints += MediaProcessor._process_hints(part, tag, bumpdir)
 
             # Process all files in this directory with these hints
-            clips += MediaProcessor._process_media(file_list, tag, hints=hints, fluid=fluid, content_type=content_type)
+            clips += MediaProcessor._process_media(file_list, tag, hints=hints, fluid=fluid, content_type=content_type, skipped=skipped)
 
         return clips
 

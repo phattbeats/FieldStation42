@@ -140,11 +140,23 @@ GET /catalogs/{network_name}
 GET /catalogs/search/{network_name}?query=search_term
 ```
 
+#### Get Skipped Files
+```http
+GET /catalogs/skipped/{network_name}
+```
+Returns every file the last catalog build could not probe, with the reason it
+was dropped. A file is skipped when neither ffprobe nor the MoviePy fallback
+can determine its duration - a corrupt header, an unsupported codec, or a probe
+that timed out (see `FS42_FFPROBE_TIMEOUT_SECONDS`).
+
+**Returns:** `{"network_name": "...", "skipped_count": 0, "skipped_files": [{"path": "...", "reason": "...", "skipped_at": "..."}]}`
+
 #### Get Catalog Summaries
 ```http
 GET /summary/catalogs
 ```
-Returns entry counts for all station catalogs.
+Returns entry counts for all station catalogs, plus `skipped_count` - the number
+of files the last build dropped because it could not probe their duration.
 
 ### ⚙️ Station Configuration
 
